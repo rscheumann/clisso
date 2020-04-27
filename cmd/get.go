@@ -32,18 +32,22 @@ func init() {
 }
 
 // processCredentials prints the given Credentials to a file and/or to the shell.
-func processCredentials(creds *aws.Credentials, app string) error {
+func processCredentials(credsList []*aws.Credentials, apps []string) error {
 	if printToShell {
 		// Print credentials to shell using the correct syntax for the OS.
-		aws.WriteToShell(creds, runtime.GOOS == "windows", os.Stdout)
+		for _, creds := range credsList {
+			aws.WriteToShell(creds, runtime.GOOS == "windows", os.Stdout)
+		}
 	} else {
 		path, err := homedir.Expand(viper.GetString("global.credentials-path"))
 		if err != nil {
 			return fmt.Errorf("expanding config file path: %v", err)
 		}
 
-		if err = aws.WriteToFile(creds, path, app); err != nil {
-			return fmt.Errorf("writing credentials to file: %v", err)
+		for i, creds := range credsList {
+			if err = aws.WriteToFile(creds, path, apps[i]); err != nil {
+				return fmt.Errorf("writing credentials to file: %v", err)
+			}
 		}
 		log.Printf(color.GreenString("Credentials written successfully to '%s'"), path)
 	}
@@ -78,6 +82,7 @@ temporary credentials from the cloud provider.
 If no app is specified, the selected app (if configured) will be assumed.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		var app string
+		var apps []string
 		if len(args) == 0 {
 			// No app specified.
 			selected := viper.GetString("global.selected-app")
@@ -86,9 +91,11 @@ If no app is specified, the selected app (if configured) will be assumed.`,
 				log.Fatal(color.RedString("No app specified and no default app configured"))
 			}
 			app = selected
+			apps = append(apps, selected)
 		} else {
 			// App specified - use it.
 			app = args[0]
+			apps = args
 		}
 
 		provider := viper.GetString(fmt.Sprintf("apps.%s.provider", app))
@@ -101,15 +108,28 @@ If no app is specified, the selected app (if configured) will be assumed.`,
 			log.Fatalf(color.RedString("Could not get provider type for provider '%s'"), provider)
 		}
 
+		for _, app := range apps {
+			provider := viper.GetString(fmt.Sprintf("apps.%s.provider", app))
+			if provider == "" {
+				log.Fatalf(color.RedString("Could not get provider for app '%s'"), app)
+			}
+
+			pType := viper.GetString(fmt.Sprintf("providers.%s.type", provider))
+			if pType == "" {
+				log.Fatalf(color.RedString("Could not get provider type for provider '%s'"), provider)
+			}
+		}
+
 		duration := sessionDuration(app, provider)
 
 		if pType == "onelogin" {
-			creds, err := onelogin.Get(app, provider, duration)
+			//creds, err := onelogin.Get(app, apps, provider, duration)
+			credsList, err := onelogin.Get(app, apps, provider, duration)
 			if err != nil {
 				log.Fatal(color.RedString("Could not get temporary credentials: "), err)
 			}
 			// Process credentials
-			err = processCredentials(creds, app)
+			err = processCredentials(credsList, apps)
 			if err != nil {
 				log.Fatalf(color.RedString("Error processing credentials: %v"), err)
 			}
@@ -119,7 +139,9 @@ If no app is specified, the selected app (if configured) will be assumed.`,
 				log.Fatal(color.RedString("Could not get temporary credentials: "), err)
 			}
 			// Process credentials
-			err = processCredentials(creds, app)
+			var credsList []*aws.Credentials
+			credsList = append(credsList, creds)
+			err = processCredentials(credsList, apps)
 			if err != nil {
 				log.Fatalf(color.RedString("Error processing credentials: %v"), err)
 			}

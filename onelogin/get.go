@@ -34,17 +34,17 @@ var (
 
 // Get gets temporary credentials for the given app.
 // TODO Move AWS logic outside this function.
-func Get(app, provider string, duration int64) (*aws.Credentials, error) {
+func Get(app string, apps []string, provider string, duration int64) ([]*aws.Credentials, error) {
 	// Read config
 	p, err := config.GetOneLoginProvider(provider)
 	if err != nil {
 		return nil, fmt.Errorf("reading provider config: %v", err)
 	}
 
-	a, err := config.GetOneLoginApp(app)
-	if err != nil {
-		return nil, fmt.Errorf("reading config for app %s: %v", app, err)
-	}
+	//a, err := config.GetOneLoginApp(app)
+	//if err != nil {
+	//	return nil, fmt.Errorf("reading config for app %s: %v", app, err)
+	//}
 
 	c, err := NewClient(p.Region)
 	if err != nil {
@@ -71,37 +71,56 @@ func Get(app, provider string, duration int64) (*aws.Credentials, error) {
 
 	pass, err := keyChain.Get(provider)
 
+	// multi
+	var credsList []*aws.Credentials
+	for _, app := range apps {
+		a, err := config.GetOneLoginApp(app)
+		if err != nil {
+			return nil, fmt.Errorf("reading config for app %s: %v", app, err)
+		}
+
+		var _, creds = getCredentials(user, pass, a.ID, p.Subdomain, c, token, duration)
+		credsList = append(credsList, creds)
+	}
+
+	//err, creds := getCredentials(user, pass, a.ID, p.Subdomain, c, token, duration)
+	//if err != nil {
+	//	return nil, err
+	//}
+
+	// multi
+	return credsList, err
+	//return creds, err
+}
+
+func getCredentials(user string, pass []byte, appId string, providerSubdomain string, c *Client, token string, duration int64) (error, *aws.Credentials) {
+	var s = spinner.New()
+
 	// Generate SAML assertion
 	pSAML := GenerateSamlAssertionParams{
 		UsernameOrEmail: user,
 		Password:        string(pass),
-		AppId:           a.ID,
+		AppId:           appId,
 		// TODO At the moment when there is a mismatch between Subdomain and
 		// the domain in the username, the user is getting HTTP 400.
-		Subdomain: p.Subdomain,
+		Subdomain: providerSubdomain,
 	}
-
 	s.Start()
 	rSaml, err := c.GenerateSamlAssertion(token, &pSAML)
 	s.Stop()
 	if err != nil {
-		return nil, fmt.Errorf("generating SAML assertion: %v", err)
+		return fmt.Errorf("generating SAML assertion: %v", err), nil
 	}
-
 	st := rSaml.Data[0].StateToken
-
 	devices := rSaml.Data[0].Devices
 	device, err := getDevice(devices)
-
 	var rMfa *VerifyFactorResponse
-
 	var pushOK = false
-
 	if device.DeviceType == MFADeviceOneLoginProtect {
 		// Push is supported by the selected MFA device - try pushing and fall back to manual input
 		pushOK = true
 		pMfa := VerifyFactorParams{
-			AppId:       a.ID,
+			AppId:       appId,
 			DeviceId:    fmt.Sprintf("%v", device.DeviceID),
 			StateToken:  st,
 			OtpToken:    "",
@@ -112,7 +131,7 @@ func Get(app, provider string, duration int64) (*aws.Credentials, error) {
 		rMfa, err = c.VerifyFactor(token, &pMfa)
 		s.Stop()
 		if err != nil {
-			return nil, err
+			return err, nil
 		}
 
 		pMfa.DoNotNotify = true
@@ -126,7 +145,7 @@ func Get(app, provider string, duration int64) (*aws.Credentials, error) {
 			rMfa, err = c.VerifyFactor(token, &pMfa)
 			if err != nil {
 				s.Stop()
-				return nil, err
+				return err, nil
 			}
 
 			timeout -= MFAInterval
@@ -138,7 +157,6 @@ func Get(app, provider string, duration int64) (*aws.Credentials, error) {
 			pushOK = false
 		}
 	}
-
 	if !pushOK {
 		// Push failed or not supported by the selected MFA device
 		fmt.Print("Please enter the OTP from your MFA device: ")
@@ -147,7 +165,7 @@ func Get(app, provider string, duration int64) (*aws.Credentials, error) {
 
 		// Verify MFA
 		pMfa := VerifyFactorParams{
-			AppId:       a.ID,
+			AppId:       appId,
 			DeviceId:    fmt.Sprintf("%v", device.DeviceID),
 			StateToken:  st,
 			OtpToken:    otp,
@@ -158,19 +176,16 @@ func Get(app, provider string, duration int64) (*aws.Credentials, error) {
 		rMfa, err = c.VerifyFactor(token, &pMfa)
 		s.Stop()
 		if err != nil {
-			return nil, fmt.Errorf("verifying factor: %v", err)
+			return fmt.Errorf("verifying factor: %v", err), nil
 		}
 	}
-
 	arn, err := saml.Get(rMfa.Data)
 	if err != nil {
-		return nil, err
+		return err, nil
 	}
-
 	s.Start()
 	creds, err := aws.AssumeSAMLRole(arn.Provider, arn.Role, rMfa.Data, duration)
 	s.Stop()
-
 	if err != nil {
 		if err.Error() == aws.ErrDurationExceeded {
 			log.Println(color.YellowString(aws.DurationExceededMessage))
@@ -179,8 +194,7 @@ func Get(app, provider string, duration int64) (*aws.Credentials, error) {
 			s.Stop()
 		}
 	}
-
-	return creds, err
+	return err, creds
 }
 
 // getDevice gets a slice of MFA devices, prompts the user to select one and returns the selected device.
